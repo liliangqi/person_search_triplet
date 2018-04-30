@@ -13,11 +13,12 @@ import yaml
 from torch.autograd import Variable
 import time
 import random
+import numpy as np
 
 from __init__ import clock_non_return
 from dataset import PersonSearchDataset
 from model import SIPN
-from losses import triplet_loss
+from losses import TripletLoss
 
 
 def parse_args():
@@ -28,7 +29,7 @@ def parse_args():
     parser.add_argument('--epochs', default=10, type=int)
     parser.add_argument('--gpu_ids', default='0', type=str)
     parser.add_argument('--data_dir', default='', type=str)
-    parser.add_argument('--lr', default=0.0001, type=float)
+    parser.add_argument('--lr', default=0.00001, type=float)
     parser.add_argument('--optimizer', default='SGD', type=str)
     parser.add_argument('--out_dir', default='./output', type=str)
     parser.add_argument('--pre_model', default='', type=str)
@@ -71,6 +72,8 @@ def train_model(dataset, net, lr, optimizer, num_epochs, use_cuda, save_dir):
     with open('config.yml', 'r') as f:
         config = yaml.load(f)
 
+    triplet_loss = TripletLoss()
+
     current_iter = 0
     for epoch in range(num_epochs):
         epoch_start = time.time()
@@ -81,11 +84,11 @@ def train_model(dataset, net, lr, optimizer, num_epochs, use_cuda, save_dir):
 
         # TODO: get num_pid from dataset rather than from the net
         num_pid = net.num_pid
-        for pid in range(num_pid):
+        for pid in range(1, num_pid):
             im_names = set(df[df['pid'] == pid]['imname'])
-            query_name = list(im_names)[random.randint(0, len(im_names))]
+            query_name = list(im_names)[random.randint(0, len(im_names) - 1)]
             # TODO: contain flipped query image into galleries
-            gallery_names = list(im_names - set(query_name))
+            gallery_names = list(im_names - set([query_name]))
 
             # TODO: Maybe we can compute loss after processing all g images
             # Create empty dicts list to save features or losses of galleries
@@ -93,6 +96,7 @@ def train_model(dataset, net, lr, optimizer, num_epochs, use_cuda, save_dir):
 
             q_im, q_roi, q_im_info = dataset.get_query_im(query_name, pid)
             q_im = q_im.transpose([0, 3, 1, 2])
+            q_roi = np.hstack(([[0]], q_roi.reshape(1, 4)))
 
             if use_cuda:
                 q_im = Variable(torch.from_numpy(q_im).cuda())
@@ -101,7 +105,7 @@ def train_model(dataset, net, lr, optimizer, num_epochs, use_cuda, save_dir):
                 q_im = Variable(torch.from_numpy(q_im))
                 q_roi = Variable(torch.from_numpy(q_roi).float())
 
-            q_feat = net(q_im, q_roi, q_im_info, model='query')
+            q_feat = net(q_im, q_roi, q_im_info, mode='query')
 
             flip = [True] * len(gallery_names) + [False] * len(gallery_names)
             for g_name, flipped in zip(gallery_names * 2, flip):
@@ -121,26 +125,38 @@ def train_model(dataset, net, lr, optimizer, num_epochs, use_cuda, save_dir):
                 det_loss, pid_label, reid_feat = net(im, gt_boxes, im_info)
 
                 # Note that -1 in `pid_label` refers to unlabeled identities
-                label_mask = (pid_label != num_pid).data
-                pid_label_drop = pid_label[label_mask]
+                mask = (pid_label.squeeze() != num_pid).nonzero().squeeze()
+                pid_label_drop = pid_label[mask]
+                reid_feat_drop = reid_feat[mask]
 
-                # label_mask = label_mask.expand(pid_label.size(0),
-                #                                reid_feat.size(1))
-                # reid_feat_drop = reid_feat[label_mask].view(
-                #     pid_label_drop.size(0), reid_feat.size(1))
+                # Pick a image exclude im_names as negative
+                neg_im, neg_boxes, neg_info = dataset.get_neg_g_im(im_names)
+                neg_im = neg_im.transpose([0, 3, 1, 2])
 
-                # A better way to implement the mask
-                reid_feat_drop = reid_feat[label_mask.nonzero().squeeze()]
+                if use_cuda:
+                    neg_im = Variable(torch.from_numpy(neg_im).cuda())
+                    neg_boxes = Variable(torch.from_numpy(
+                        neg_boxes).float().cuda())
+
+                # TODO: maybe we should contain the det_loss of negative image
+                _, neg_label, neg_feat = net(neg_im, neg_boxes, neg_info)
+                neg_mask = (neg_label.squeeze() != num_pid).nonzero().squeeze()
+                neg_label_drop = neg_label[neg_mask]
+                neg_feat_drop = neg_feat[neg_mask]
+
+                tri_label = torch.cat((pid_label_drop.squeeze(),
+                                      neg_label_drop.squeeze()))
+                tri_feat = torch.cat((reid_feat_drop, neg_feat_drop), 0)
 
                 # Forward propagation
-                reid_loss = triplet_loss(q_feat, pid, reid_feat_drop,
-                                         pid_label_drop, mode='hard')
+                reid_loss = triplet_loss(q_feat, pid, tri_feat, tri_label,
+                                         mode='hard')
 
                 # Backward propagation
                 optimizer.zero_grad()
                 total_loss = det_loss[0] + det_loss[1] + det_loss[2] + \
                     det_loss[3] + reid_loss
-                total_loss.backward()
+                total_loss.backward(retain_graph=True)
                 optimizer.step()
 
                 all_epoch_loss += total_loss.data[0]
@@ -155,41 +171,7 @@ def train_model(dataset, net, lr, optimizer, num_epochs, use_cuda, save_dir):
             print('>>>> box: {:.6f}'.format(det_loss[3].data[0]))
             print('>>>> reid: {:.6f}'.format(reid_loss.data[0]))
             print('time cost: {:.3f}s/person'.format(
-                (end - start) / (pid + 1)))
-
-        # for step in range(len(dataset)):
-        #     im, gt_boxes, im_info = dataset.next()
-        #     im = im.transpose([0, 3, 1, 2])
-        #
-        #     if use_cuda:
-        #         im = Variable(torch.from_numpy(im).cuda())
-        #         gt_boxes = Variable(torch.from_numpy(gt_boxes).float().cuda()
-        # )
-        #     else:
-        #         im = Variable(torch.from_numpy(im))
-        #         gt_boxes = Variable(torch.from_numpy(gt_boxes).float())
-        #
-        #     losses = net(im, gt_boxes, im_info)
-        #     optimizer.zero_grad()
-        #     total_loss = sum(losses)
-        #     total_loss.backward()
-        #     optimizer.step()
-        #
-        #     all_epoch_loss += total_loss.data[0]
-        #     current_iter = epoch * len(dataset) + step + 1
-        #     average_loss = all_epoch_loss / current_iter
-        #
-        #     if (step+1) % config['disp_interval'] == 0:
-        #         end = time.time()
-        #         print('Epoch {:2d}, iter {:5d}, average loss: {:.6f}, lr: '
-        #               '{:.2e}'.format(epoch+1, step+1, average_loss, lr))
-        #         print('>>>> rpn_cls: {:.6f}'.format(losses[0].data[0]))
-        #         print('>>>> rpn_box: {:.6f}'.format(losses[1].data[0]))
-        #         print('>>>> cls: {:.6f}'.format(losses[2].data[0]))
-        #         print('>>>> box: {:.6f}'.format(losses[3].data[0]))
-        #         print('>>>> reid: {:.6f}'.format(losses[4].data[0]))
-        #         print('time cost: {:.3f}s/iter'.format(
-        #             (end - start) / (epoch * len(dataset) + (step + 1))))
+                (end - start) / (epoch * num_pid + pid + 1)))
 
         epoch_end = time.time()
         print('\nEntire epoch time cost: {:.2f} hours\n'.format(
@@ -237,6 +219,8 @@ def main():
 
     # Train the model
     train_model(dataset, model, lr, optimizer, opt.epochs, use_cuda, save_dir)
+
+    print('Done')
 
 
 if __name__ == '__main__':
