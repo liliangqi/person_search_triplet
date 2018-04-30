@@ -24,8 +24,8 @@ class SIPN(nn.Module):
         self.is_train = is_train
 
         # TODO: set depending on dataset
-        self.num_pid = 5532
-        self.queue_size = 5000
+        self.num_pid = 483
+        self.queue_size = 500
         self.lut_momentum = 0.5
         self.reid_feat_dim = 256
 
@@ -62,7 +62,8 @@ class SIPN(nn.Module):
                 fc7 = self.tail(pooled_feat).mean(3).mean(2)
                 cls_score = self.cls_score_net(fc7)
                 bbox_pred = self.bbox_pred_net(fc7)
-                reid_feat = F.normalize(self.reid_feat_net(fc7))
+                # reid_feat = F.normalize(self.reid_feat_net(fc7))
+                reid_feat = self.reid_feat_net(fc7)
 
                 det_label, pid_label = label
                 det_label = det_label.view(-1)
@@ -78,7 +79,8 @@ class SIPN(nn.Module):
                 # TODO: move pooling layer from strpn to SIPN
                 pooled_feat = self.strpn(net_conv, gt_boxes, im_info, mode)
                 fc7 = self.tail(pooled_feat).mean(3).mean(2)
-                reid_feat = F.normalize(self.reid_feat_net(fc7))
+                # reid_feat = F.normalize(self.reid_feat_net(fc7))
+                reid_feat = self.reid_feat_net(fc7)
 
                 return reid_feat
 
@@ -113,7 +115,8 @@ class SIPN(nn.Module):
                 fc7 = self.tail(pooled_feat).mean(3).mean(2)
                 cls_score = self.cls_score_net(fc7)
                 bbox_pred = self.bbox_pred_net(fc7)
-                reid_feat = F.normalize(self.reid_feat_net(fc7))
+                # reid_feat = F.normalize(self.reid_feat_net(fc7))
+                reid_feat = self.reid_feat_net(fc7)
 
                 cls_pred = torch.max(cls_score, 1)[1]
                 cls_prob = F.softmax(cls_score)
@@ -140,7 +143,8 @@ class SIPN(nn.Module):
                 # TODO: move pooling layer from strpn to SIPN
                 pooled_feat = self.strpn(net_conv, gt_boxes, im_info, mode)
                 fc7 = self.tail(pooled_feat).mean(3).mean(2)
-                reid_feat = F.normalize(self.reid_feat_net(fc7))
+                # reid_feat = F.normalize(self.reid_feat_net(fc7))
+                reid_feat = self.reid_feat_net(fc7)
 
                 return reid_feat.data.cpu().numpy()
 
