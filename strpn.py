@@ -476,12 +476,34 @@ class STRPN(nn.Module):
             # fixed number of regions are sampled
             if fg_inds.numel() > 0 and bg_inds.numel() > 0:
                 fg_rois_per_im = min(fg_rois_per_im, fg_inds.numel())
-                fg_inds = fg_inds[torch.from_numpy(
-                    npr.choice(np.arange(0, fg_inds.numel()),
-                               size=int(fg_rois_per_im),
-                               replace=False)).long().cuda()]
-                fg_inds = torch.from_numpy(
-                    (np.sort(fg_inds.cpu().numpy()))).long().cuda()
+
+                if gt_box.size(0) < fg_rois_per_im:
+                    gt_inds = torch.from_numpy(np.arange(
+                        0, gt_box.size(0))).long().cuda()
+                    fg_inds = torch.cat((gt_inds, fg_inds[torch.from_numpy(
+                        npr.choice(np.arange(gt_box.size(0), fg_inds.numel()),
+                                   size=int(fg_rois_per_im) - gt_box.size(0),
+                                   replace=False)).long().cuda()]))
+                else:
+                    lab_inds = (gt_box[:, 5] != -1).nonzero().squeeze().data
+                    if -1 in gt_box[:, 5].data:
+                        unlab_inds = (gt_box[:, 5] == -1).nonzero().squeeze(
+                            ).data
+                        fg_inds = torch.cat((lab_inds, torch.from_numpy(
+                            npr.choice(unlab_inds.cpu().numpy(),
+                                       size=fg_rois_per_im - lab_inds.numel(),
+                                       replace=False)).long().cuda()))
+                    else:
+                        fg_inds = lab_inds
+
+                # # ====================origin==========================
+                # fg_inds = fg_inds[torch.from_numpy(
+                #     npr.choice(np.arange(0, fg_inds.numel()),
+                #                size=int(fg_rois_per_im),
+                #                replace=False)).long().cuda()]
+                # fg_inds = torch.from_numpy(
+                #     (np.sort(fg_inds.cpu().numpy()))).long().cuda()
+
                 bg_rois_per_im = rois_per_im - fg_rois_per_im
                 to_replace = bg_inds.numel() < bg_rois_per_im
                 bg_inds = bg_inds[torch.from_numpy(
