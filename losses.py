@@ -51,43 +51,64 @@ def euclidean_distance(x, y):
     return distance
 
 
-def triplet_loss(q_feature, q_label, g_features, g_labels, mode='hard'):
+def cosine_similarity(x, y):
     """
-    Compute triplet loss between query and galleries using query as anchor.
+    Compute Euclidean distance between two Variable matrices.
     ---
     param:
-        q_feature: Pytorch Variable refers to query feature with shape (1, D)
-        g_features: Pytorch Variable refers to gallery features with shape
-                    (N, D), where N is the number of persons in the gallery
-        q_label: (int) the label of the query
-        g_label: Pytorch Variable refers to labels gallery rois
-        mode: (str) hard mining or average
+        x: PyTorch Variable with shape (m, d)
+        y: PyTorch Variable with shape (n, d)
+    return:
+        similarity: PyTorch Variable with shape (m, n)
     """
-    assert q_label in g_labels.data, \
-        '{:d} does not exist in gallery rois'.format(q_label)
-    with open('config.yml', 'r') as f:
-        config = yaml.load(f)
-    loss_model = nn.MarginRankingLoss(margin=config['triplet_margin'])
+    similarity = x.mm(y.t())
+    return similarity
 
-    # TODO: add cosine similarity
-    distance = euclidean_distance(q_feature, g_features)
-    is_pos = g_labels == q_label
-    is_neg = g_labels != q_label
 
-    if mode == 'hard':
-        dist_ap = torch.max(distance[is_pos])
-        dist_an = torch.min(distance[is_neg])
-        loss = loss_model(dist_an, dist_ap, Variable(torch.ones(1, 1)))
-        return loss
+class TripletLoss:
 
-    elif mode == 'average':
-        dist_ap = torch.mean(distance[is_pos])
-        dist_an = torch.mean(distance[is_neg])
-        loss = loss_model(dist_an, dist_ap, Variable(torch.ones(1, 1)))
-        return loss
+    def __init__(self):
+        with open('config.yml', 'r') as f:
+            config = yaml.load(f)
+        margin = config['triplet_margin']
+        self.ranking_loss = nn.MarginRankingLoss(margin=margin)
 
-    else:
-        raise KeyError(mode)
+    def __call__(self, q_feature, q_label, g_features, g_labels, mode='hard'):
+        """
+        Compute triplet loss between query and galleries using query as anchor.
+        ---
+        param:
+            q_feature: PyTorch Variable refers to query feature in shape (1, D)
+            g_features: PyTorch Variable refers to gallery features with shape
+                        (N, D), where N is the number of persons in the gallery
+            q_label: (int) the label of the query
+            g_label: PyTorch Variable refers to labels gallery rois
+            mode: (str) hard mining or average
+        """
+        assert q_label in g_labels.data, \
+            '{:d} does not exist in gallery rois'.format(q_label)
+
+        distance = euclidean_distance(q_feature, g_features)
+        # distance = -cosine_similarity(q_feature, g_features)
+        is_pos = g_labels == q_label
+        is_neg = g_labels != q_label
+
+        if mode == 'hard':
+            dist_ap = torch.max(distance[is_pos])
+            dist_an = torch.min(distance[is_neg])
+            loss = self.ranking_loss(dist_an, dist_ap,
+                                     Variable(torch.ones(1).cuda()))
+            return loss
+
+        elif mode == 'average':
+            dist_ap = torch.mean(distance[is_pos])
+            dist_an = torch.mean(distance[is_neg])
+            loss = self.ranking_loss(dist_an, dist_ap,
+                                     Variable(torch.ones(1).cuda()))
+            return loss
+
+        else:
+            raise KeyError(mode)
 
 
 class OIM(Function):
