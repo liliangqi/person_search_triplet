@@ -53,7 +53,9 @@ class PersonSearchDataset:
         self.test_imnames_file = 'testImnamesSe.csv'
         self.train_all_file = 'trainAllDF.csv'
         self.test_all_file = 'testAllDF.csv'
-        self.gallery_sizes = [50, 100, 500, 1000, 2000, 4000]
+        self.query_file = 'queryDF.csv'
+        # self.gallery_sizes = [50, 100, 500, 1000, 2000, 4000]
+        self.gallery_sizes = [200, 500, 1000, 2000, 4000]
 
         if not osp.exists(self.cache_dir):
             os.mkdir(self.cache_dir)
@@ -81,6 +83,8 @@ class PersonSearchDataset:
             q_to_g_file = 'q_to_g' + str(gallery_size) + 'DF.csv'
             self.queries_to_galleries = pd.read_csv(
                 osp.join(self.annotation_dir, q_to_g_file))
+            self.query_boxes = pd.read_csv(osp.join(self.annotation_dir,
+                                                    self.query_file))
             self.delta_to_coordinates()
             self.num_test_images = self.test_imnames.shape[0]
             self.test_imnames_list = list(range(self.num_test_images))[::-1]
@@ -100,6 +104,10 @@ class PersonSearchDataset:
         self.test_all['del_y'] += self.test_all['y1']
         self.test_all.rename(columns={'del_x': 'x2', 'del_y': 'y2'},
                              inplace=True)
+        self.query_boxes['del_x'] += self.query_boxes['x1']
+        self.query_boxes['del_y'] += self.query_boxes['y1']
+        self.query_boxes.rename(columns={'del_x': 'x2', 'del_y': 'y2'},
+                                inplace=True)
 
     def prepare_training(self):
         """prepare dataset for training, including flipping, resizing"""
@@ -121,6 +129,13 @@ class PersonSearchDataset:
                                     header=None, squeeze=True)
         train_all = pd.read_csv(osp.join(self.annotation_dir,
                                          self.train_all_file))
+
+        # filter out the outliers
+        # outliers = [9378, 20121, 47308, 31635, 53597]
+        outliers = [528, 9875, 2709, 5517, 5418, 1178, 181, 8804, 2600, 15348]
+        for outlier in outliers:
+            train_all.drop(outlier, inplace=True)
+        train_all.index = range(train_all.shape[0])
 
         # formal
         widths = [PIL.Image.open(osp.join(self.images_dir, imname)).size[0]
@@ -266,12 +281,9 @@ class PersonSearchDataset:
                                 interpolation=cv2.INTER_LINEAR)
                 im = im[np.newaxis, :]  # add batch dimension
 
-                df = self.test_all.copy()
-                df = df[df['imname'] == im_name]
-                gt_boxes = df[df['is_query'] == 1]
-                gt_boxes = gt_boxes[gt_boxes['pid'] == chosen]
-                gt_boxes = gt_boxes.loc[:, 'x1': 'y2'] * im_scale
-                gt_boxes = gt_boxes.as_matrix()
+                df = self.query_boxes.copy()
+                gt_boxes = df.ix[chosen, 'x1': 'y2'] * im_scale
+                gt_boxes = gt_boxes.as_matrix().astype(np.float64)
 
                 im_info = np.array([im.shape[1], im.shape[2], im_scale],
                                    dtype=np.float32)
@@ -323,7 +335,7 @@ class PersonSearchDataset:
         pixel_means = np.array([[[102.9801, 115.9465, 122.7717]]])
 
         im = cv2.imread(osp.join(self.images_dir, gallery_name))
-        if flipped == 1:
+        if flipped:
             im = im[:, ::-1, :]
         im = im.astype(np.float32, copy=False)
         im -= pixel_means
@@ -341,6 +353,46 @@ class PersonSearchDataset:
         df = self.train_all.copy()
         # TODO: use pandas.query
         df = df[df['imname'] == gallery_name]
+        df = df[df['flipped'] == flipped]
+        gt_boxes = df.loc[:, 'x1': 'pid']
+        gt_boxes.loc[:, 'x1': 'y2'] *= im_scale
+        gt_boxes = gt_boxes.values
+
+        im_info = np.array([im.shape[1], im.shape[2], im_scale],
+                           dtype=np.float32)
+
+        return im, gt_boxes, im_info
+
+    def get_neg_g_im(self, g_imnames):
+        """Select a negative image that does not contain person of pid"""
+
+        choose_from = set(self.train_imnames['imname']) - g_imnames
+        im_name = random.choice(list(choose_from))
+        flipped = random.choice([True, False])
+
+        target_size = 600
+        max_size = 1000
+        pixel_means = np.array([[[102.9801, 115.9465, 122.7717]]])
+
+        im = cv2.imread(osp.join(self.images_dir, im_name))
+        if flipped:
+            im = im[:, ::-1, :]
+        im = im.astype(np.float32, copy=False)
+        im -= pixel_means
+        im_shape = im.shape
+        im_size_min = np.min(im_shape[0:2])
+        im_size_max = np.max(im_shape[0:2])
+        im_scale = float(target_size) / float(im_size_min)
+        # Prevent the biggest axis from being more than MAX_SIZE
+        if np.round(im_scale * im_size_max) > max_size:
+            im_scale = float(max_size) / float(im_size_max)
+        im = cv2.resize(im, None, None, fx=im_scale, fy=im_scale,
+                        interpolation=cv2.INTER_LINEAR)
+        im = im[np.newaxis, :]  # add batch dimension
+
+        df = self.train_all.copy()
+        # TODO: use pandas.query
+        df = df[df['imname'] == im_name]
         df = df[df['flipped'] == flipped]
         gt_boxes = df.loc[:, 'x1': 'pid']
         gt_boxes.loc[:, 'x1': 'y2'] *= im_scale
@@ -452,7 +504,7 @@ class PersonSearchDataset:
         topk = [1, 5, 10]
         # ret  # TODO: save json
         for i in range(len(probe_feat)):
-            pid = i
+            pid = self.query_boxes.ix[i, 'pid']
             y_true, y_score = [], []
             imgs, rois = [], []
             count_gt, count_tp = 0, 0
@@ -482,8 +534,14 @@ class PersonSearchDataset:
                 # get L2-normalized feature matrix NxD
                 assert feat_g.size == np.prod(feat_g.shape[:2])
                 feat_g = feat_g.reshape(feat_g.shape[:2])
-                # compute cosine similarities
-                sim = feat_g.dot(feat_p).ravel()
+
+                # # compute cosine similarities
+                # sim = feat_g.dot(feat_p).ravel()
+
+                # compute euclidean distance
+                dist = np.square(feat_p - feat_g).sum(1)
+                sim = -dist
+
                 # assign label for each det
                 label = np.zeros(len(sim), dtype=np.int32)
                 if gt.size > 0:
